@@ -280,6 +280,21 @@
   }
 
   function start() {
+    if (new URLSearchParams(location.search).has('debug')) {
+      setTimeout(() => {
+        let worst = null;
+        let max = 0;
+        document.querySelectorAll('*').forEach((el) => {
+          const rect = el.getBoundingClientRect();
+          if (rect.right > max) {
+            max = rect.right;
+            worst = el;
+          }
+        });
+        const desc = worst ? `${worst.tagName}.${String(worst.className).slice(0, 40)}` : '-';
+        document.title = `iw=${innerWidth} sw=${document.documentElement.scrollWidth} bw=${document.body.scrollWidth} maxRight=${max.toFixed(0)} el=${desc}`;
+      }, 1500);
+    }
     const fromUrl = Number(new URLSearchParams(location.search).get('range'));
     if (RANGES[fromUrl]) state.rangeMinutes = fromUrl;
     setActiveTab();
