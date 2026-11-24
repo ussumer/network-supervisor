@@ -23,13 +23,14 @@ from typing import Any, Iterable
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS usage_min (
     minute  INTEGER NOT NULL,
+    device  TEXT    NOT NULL DEFAULT 'local',
     process TEXT    NOT NULL,
     node    TEXT    NOT NULL,
     host    TEXT    NOT NULL,
     rule    TEXT    NOT NULL,
     up      INTEGER NOT NULL DEFAULT 0,
     down    INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (minute, process, node, host, rule)
+    PRIMARY KEY (minute, device, process, node, host, rule)
 ) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS node_ratio (
@@ -52,8 +53,22 @@ CREATE TABLE IF NOT EXISTS event (
 CREATE INDEX IF NOT EXISTS idx_event_ts ON event(ts);
 """
 
+USAGE_TABLE = """
+CREATE TABLE usage_min (
+    minute  INTEGER NOT NULL,
+    device  TEXT    NOT NULL DEFAULT 'local',
+    process TEXT    NOT NULL,
+    node    TEXT    NOT NULL,
+    host    TEXT    NOT NULL,
+    rule    TEXT    NOT NULL,
+    up      INTEGER NOT NULL DEFAULT 0,
+    down    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (minute, device, process, node, host, rule)
+) WITHOUT ROWID
+"""
+
 DIRECT_NODES = {"DIRECT", "REJECT", ""}
-DIMS = {"process", "host", "node", "rule"}
+DIMS = {"process", "host", "node", "rule", "device"}
 
 
 class Store:
@@ -71,19 +86,35 @@ class Store:
         with self._lock:
             self._db.executescript(SCHEMA)
             self._db.commit()
+            self._migrate_device_column()
         self._ratios: list[tuple[re.Pattern[str], float]] = []
         self._ratios_ts = 0.0
 
+    def _migrate_device_column(self) -> None:
+        """Older databases (single-device era) get the device column retro-fitted."""
+        columns = {row["name"] for row in self._db.execute("PRAGMA table_info(usage_min)")}
+        if "device" in columns:
+            return
+        self._db.executescript(f"""
+            ALTER TABLE usage_min RENAME TO usage_min_legacy;
+            {USAGE_TABLE};
+            INSERT INTO usage_min (minute, device, process, node, host, rule, up, down)
+                SELECT minute, 'local', process, node, host, rule, up, down
+                FROM usage_min_legacy;
+            DROP TABLE usage_min_legacy;
+        """)
+        self._db.commit()
+
     # ------------------------------------------------------------------ writes
-    def add_usage(self, rows: Iterable[tuple[int, str, str, str, str, int, int]]) -> int:
+    def add_usage(self, rows: Iterable[tuple[int, str, str, str, str, str, int, int]]) -> int:
         rows = list(rows)
         if not rows:
             return 0
         with self._lock:
             self._db.executemany(
-                """INSERT INTO usage_min (minute, process, node, host, rule, up, down)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(minute, process, node, host, rule)
+                """INSERT INTO usage_min (minute, device, process, node, host, rule, up, down)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(minute, device, process, node, host, rule)
                    DO UPDATE SET up = up + excluded.up, down = down + excluded.down""",
                 rows,
             )
@@ -278,6 +309,55 @@ class Store:
                 "SELECT ts, kind, detail FROM event ORDER BY ts DESC LIMIT ?", (limit,)
             ).fetchall()
         return [{"ts": row["ts"], "kind": row["kind"], "detail": row["detail"]} for row in rows]
+
+    def devices(self, start: int, end: int, billing_mode: str = "updown") -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._db.execute(
+                """SELECT device, node, SUM(up) AS u, SUM(down) AS d
+                   FROM usage_min WHERE minute >= ? AND minute < ?
+                   GROUP BY device, node""",
+                (start, end),
+            ).fetchall()
+        ratios = self.load_ratios()
+        agg: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            name = row["device"] or "local"
+            item = agg.setdefault(name, {"name": name, "up": 0, "down": 0, "direct": 0,
+                                         "raw": 0, "billed": 0.0})
+            up, down = int(row["u"] or 0), int(row["d"] or 0)
+            item["up"] += up
+            item["down"] += down
+            node = row["node"] or ""
+            if node in DIRECT_NODES:
+                item["direct"] += up + down
+                continue
+            raw = down if billing_mode == "down" else up + down
+            item["raw"] += raw
+            item["billed"] += raw * self.ratio_for(node, ratios)
+        items = sorted(agg.values(), key=lambda i: i["billed"] + i["direct"], reverse=True)
+        peak = max([i["billed"] + i["direct"] for i in items] or [1]) or 1
+        for item in items:
+            item["billed"] = int(round(item["billed"]))
+            item["share"] = round((item["billed"] + item["direct"]) / peak * 100, 1)
+        return items
+
+    def rename_device(self, old: str, new: str) -> int:
+        """Fold legacy rows into the configured device name, merging byte counts."""
+        if not new or old == new:
+            return 0
+        with self._lock:
+            cur = self._db.execute(
+                """INSERT INTO usage_min (minute, device, process, node, host, rule, up, down)
+                   SELECT minute, ?, process, node, host, rule, up, down
+                   FROM usage_min WHERE device = ?
+                   ON CONFLICT(minute, device, process, node, host, rule)
+                   DO UPDATE SET up = up + excluded.up, down = down + excluded.down""",
+                (new, old),
+            )
+            merged = cur.rowcount
+            self._db.execute("DELETE FROM usage_min WHERE device = ?", (old,))
+            self._db.commit()
+        return merged
 
     def first_minute(self, start: int) -> int | None:
         """Earliest bucket we have recorded at or after ``start`` (None if empty)."""

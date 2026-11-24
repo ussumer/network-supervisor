@@ -108,6 +108,43 @@ docker compose down -v     # 停容器并删除数据卷
 
 ---
 
+## 手机上报（Android + Termux）
+
+看板默认只统计跑着它的那台机器。手机要单独采，用一个纯标准库的小 agent，数据按设备名汇总进同一张表。
+
+**1. PC 端 `.env`**
+
+```
+BIND_ADDR=0.0.0.0            # 让手机能连进来（默认 127.0.0.1 只允许本机）
+INGEST_TOKEN=<随机串>         # 上报口令，手机端 --token 用这个
+DASHBOARD_TOKEN=<随机串>      # 可选：看板访问口令，设了就用 /?k=口令 打开一次
+```
+
+改完 `docker compose up -d`。
+
+**2. 手机（Termux）**
+
+```bash
+pkg install -y python
+curl -O https://raw.githubusercontent.com/ussumer/network-supervisor/main/scripts/android-agent.py
+python android-agent.py --server http://<PC内网IP>:8787 --token <INGEST_TOKEN>
+```
+
+**3. 后台常驻**
+
+```bash
+termux-wake-lock
+nohup python android-agent.py --server http://<PC内网IP>:8787 --token <INGEST_TOKEN> > ~/radar.log 2>&1 &
+```
+
+前提：手机里的 Clash 客户端要开着「外部控制器」。ClashMetaForAndroid 在 设置 → 网络 → 外部控制器，默认 `127.0.0.1:9090`，agent 默认就读这个地址；客户端如果设了 secret，用 `--secret` 传。
+
+看到 `[ok] 已上报 N 行` 就说明通了，看板「设备」一栏会多出一行，**总额是各设备之和**——这才是机场账号的真实消耗。
+
+限制：iOS 没有对应方案（Shadowrocket 不支持脚本），只能用 Stash/Surge 自己写；手机和 PC 要在同一局域网，或者都连 Tailscale。
+
+---
+
 ## 和机场面板对账
 
 在宿主机跑一次受控下载，比较两边增量：
@@ -176,7 +213,8 @@ network-supervisor/          # 仓库根目录
 ├─ Dockerfile
 ├─ .env.example
 ├─ scripts/
-│  └─ setup-windows.ps1      # 一键探测 + 生成 .env + 启动
+│  ├─ setup-windows.ps1      # 一键探测 + 生成 .env + 启动
+│  └─ android-agent.py       # 手机端（Termux）采集上报
 ├─ app/
 │  ├─ config.py      # 环境变量
 │  ├─ collector.py   # 轮询 / 差分 / 残余归因 / 重连

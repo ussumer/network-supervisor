@@ -1,17 +1,19 @@
-"""Unit tests for the accounting core.  Run: python -m unittest discover -s tests -v"""
+﻿"""Unit tests for the accounting core.  Run: python -m unittest discover -s tests -v"""
 
 from __future__ import annotations
 
 import os
 import sys
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.collector import Collector  # noqa: E402
-from app.main import cycle_window, local_midnight  # noqa: E402
+from app.config import Config  # noqa: E402
+from app.main import App, cycle_window, local_midnight  # noqa: E402
 from app.store import Store  # noqa: E402
 
 TZ8 = timezone(timedelta(hours=8))
@@ -64,7 +66,7 @@ class CollectorDiffTest(unittest.TestCase):
 
     def total(self):
         rows = self.store.rows
-        return sum(r[5] for r in rows), sum(r[6] for r in rows)
+        return sum(r[6] for r in rows), sum(r[7] for r in rows)
 
     def test_first_poll_only_primes(self):
         store = FakeStore()
@@ -96,12 +98,12 @@ class CollectorDiffTest(unittest.TestCase):
         # connection closed between polls: global counter still sees the tail
         self.collector._ingest(payload(up_total=100, down_total=1500), 1.0)
         self.assertEqual(self.total(), (100, 1500))
-        self.assertEqual(self.store.rows[-1][1], "OneDrive.exe")
+        self.assertEqual(self.store.rows[-1][2], "OneDrive.exe")
 
     def test_residual_without_vanished_goes_to_unattributed(self):
         self.collector._ingest(payload(up_total=0, down_total=300), 1.0)
         self.assertEqual(self.total(), (0, 300))
-        self.assertEqual(self.store.rows[0][1], "(unattributed)")
+        self.assertEqual(self.store.rows[0][2], "(unattributed)")
 
     def test_counter_reset_does_not_double_count(self):
         self.collector._ingest(
@@ -116,14 +118,14 @@ class CollectorDiffTest(unittest.TestCase):
             payload(conn("a", 1, 1, process="", host=""), up_total=1, down_total=1), 1.0
         )
         row = self.store.rows[0]
-        self.assertEqual(row[1], "(unknown)")
-        self.assertEqual(row[3], "(unknown)")
+        self.assertEqual(row[2], "(unknown)")
+        self.assertEqual(row[4], "(unknown)")
 
     def test_direct_chain_kept_as_direct(self):
         item = conn("a", 5, 5)
         item["chains"] = ["DIRECT"]
         self.collector._ingest(payload(item, up_total=5, down_total=5), 1.0)
-        self.assertEqual(self.store.rows[0][2], "DIRECT")
+        self.assertEqual(self.store.rows[0][3], "DIRECT")
 
 
 class SecretDiscoveryTest(unittest.TestCase):
@@ -166,8 +168,8 @@ class StoreMathTest(unittest.TestCase):
         self.store.close()
         self.tmp.cleanup()
 
-    def add(self, node, up, down, process="chrome.exe", host="x.com", rule="Rule"):
-        self.store.add_usage([(self.minute, process, node, host, rule, up, down)])
+    def add(self, node, up, down, process="chrome.exe", host="x.com", rule="Rule", device="local"):
+        self.store.add_usage([(self.minute, device, process, node, host, rule, up, down)])
 
     def test_ratio_applies_and_direct_is_excluded(self):
         self.store.set_ratios([{"pattern": "^GBR", "ratio": 2.0}])
@@ -210,6 +212,39 @@ class StoreMathTest(unittest.TestCase):
         self.store.put_settings({"budget_gb": 200, "billing_mode": "down"})
         self.assertEqual(self.store.get_settings()["budget_gb"], 200)
 
+    def test_devices_split_by_name(self):
+        self.add("GBR", 100, 900, device="pc")
+        self.add("HKG", 50, 50, device="pixel-8")
+        items = self.store.devices(0, 2 ** 31, "updown")
+        by_name = {item["name"]: item for item in items}
+        self.assertEqual(by_name["pc"]["billed"], 1000)
+        self.assertEqual(by_name["pixel-8"]["billed"], 100)
+        self.assertEqual(items[0]["name"], "pc")
+
+    def test_legacy_single_device_db_is_migrated(self):
+        import sqlite3
+        path = os.path.join(self.tmp.name, "legacy.db")
+        raw = sqlite3.connect(path)
+        raw.executescript("""
+            CREATE TABLE usage_min (
+                minute INTEGER NOT NULL, process TEXT NOT NULL, node TEXT NOT NULL,
+                host TEXT NOT NULL, rule TEXT NOT NULL,
+                up INTEGER NOT NULL DEFAULT 0, down INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (minute, process, node, host, rule)
+            ) WITHOUT ROWID;
+            INSERT INTO usage_min VALUES (1000, 'chrome.exe', 'GBR', 'a.com', 'Rule', 10, 20);
+        """)
+        raw.commit()
+        raw.close()
+        store = Store(path)
+        try:
+            items = store.devices(0, 2 ** 31, "updown")
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0]["name"], "local")
+            self.assertEqual(items[0]["billed"], 30)
+        finally:
+            store.close()
+
 
 class CycleWindowTest(unittest.TestCase):
     def ts(self, *args):
@@ -240,6 +275,48 @@ class CycleWindowTest(unittest.TestCase):
         start, end = local_midnight(self.ts(2026, 11, 22, 23, 30), 8)
         self.assertEqual(start, self.ts(2026, 11, 22))
         self.assertEqual(end, self.ts(2026, 11, 23))
+
+
+class IngestTest(unittest.TestCase):
+    class DummyCollector:
+        started = 0
+
+        def rate(self):
+            return (0.0, 0.0)
+
+        def live(self):
+            return []
+
+        def status(self):
+            return {"ok": True}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = Store(os.path.join(self.tmp.name, "t.db"))
+        self.app = App(Config(), self.store, self.DummyCollector())
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def test_accepts_valid_rows_and_drops_junk(self):
+        now = int(time.time())
+        result = self.app.ingest({"device": "pixel/8 !!", "rows": [
+            {"minute": now, "process": "Clash", "node": "HKG 香港 01",
+             "host": "youtube.com", "rule": "Match", "up": 10, "down": 100},
+            {"minute": 0, "up": 1, "down": 1},
+            {"minute": now, "up": 0, "down": 0},
+            "junk",
+        ]})
+        self.assertEqual(result["accepted"], 1)
+        self.assertEqual(result["device"], "pixel8")
+        items = self.store.devices(0, 2 ** 31, "updown")
+        self.assertEqual(items[0]["name"], "pixel8")
+        self.assertEqual(items[0]["billed"], 110)
+
+    def test_rejects_non_list_payload(self):
+        with self.assertRaises(ValueError):
+            self.app.ingest({"rows": "nope"})
 
 
 if __name__ == "__main__":

@@ -35,6 +35,10 @@ class Config:
         self.cycle_mode: str = (os.getenv("CYCLE_MODE") or "calendar").lower()
         self.cycle_start_day: int = _i("CYCLE_START_DAY", 1)
         self.cycle_days: int = _i("CYCLE_DAYS", 30)
+        # multi-device support
+        self.device_name: str = os.getenv("DEVICE_NAME") or "local"
+        self.ingest_token: str = os.getenv("INGEST_TOKEN") or ""
+        self.dashboard_token: str = os.getenv("DASHBOARD_TOKEN") or ""
 
     @property
     def budget_bytes(self) -> int:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import signal
@@ -198,6 +199,47 @@ class App:
             "status": self.collector.status(),
         }
 
+    def devices(self, hours: float) -> dict:
+        now = int(time.time())
+        start = now - int(_clamp(hours, 0.25, 24 * 90) * 3600)
+        return {"items": self.store.devices(start, now, self.billing_mode)}
+
+    # ------------------------------------------------------------ phone ingest
+    def ingest(self, body: dict) -> dict:
+        rows_in = body.get("rows")
+        if not isinstance(rows_in, list):
+            raise ValueError("rows must be a list")
+        if len(rows_in) > 5000:
+            raise ValueError("too many rows (max 5000)")
+        device = str(body.get("device") or "").strip()[:32] or "phone"
+        device = "".join(ch for ch in device if ch.isalnum() or ch in "-_.") or "phone"
+        now = int(time.time())
+        lowest = now - 30 * 86400
+        clean: list[tuple] = []
+        for item in rows_in:
+            if not isinstance(item, dict):
+                continue
+            try:
+                minute = int(item.get("minute")) // 60 * 60
+            except (TypeError, ValueError):
+                continue
+            if minute < lowest or minute > now + 120:
+                continue
+            up = max(0, min(int(item.get("up") or 0), 10 ** 12))
+            down = max(0, min(int(item.get("down") or 0), 10 ** 12))
+            if not up and not down:
+                continue
+            clean.append((
+                minute, device,
+                str(item.get("process") or "(unknown)")[:120],
+                str(item.get("node") or "DIRECT")[:120],
+                str(item.get("host") or "(unknown)")[:200],
+                str(item.get("rule") or "")[:120],
+                up, down,
+            ))
+        accepted = self.store.add_usage(clean)
+        return {"ok": True, "accepted": accepted, "device": device}
+
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "clash-radar/1.0"
@@ -210,6 +252,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            cookie = getattr(self, "_cookie", None)
+            if cookie:
+                self.send_header("Set-Cookie", cookie)
             self.end_headers()
             self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError):
@@ -238,6 +283,11 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         query = parse_qs(parsed.query)
 
+        if path != "/api/health" and not self._authorized(query):
+            self._json({"error": "unauthorized",
+                        "hint": "先访问 /?k=<DASHBOARD_TOKEN> 一次，浏览器会记住"}, 401)
+            return
+
         def q(name: str, default: str) -> str:
             return (query.get(name) or [default])[0]
 
@@ -259,6 +309,8 @@ class Handler(BaseHTTPRequestHandler):
                                         int(q("limit", "10"))))
             elif path == "/api/live":
                 self._json(self.app.live(int(q("limit", "50"))))
+            elif path == "/api/devices":
+                self._json(self.app.devices(float(q("hours", "24"))))
             elif path == "/api/events":
                 self._json({"items": self.app.store.events(int(q("limit", "20")))})
             elif path == "/api/settings":
@@ -281,12 +333,54 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": str(exc)}, 500)
 
     # -------------------------------------------------------------------- POST
+    def _authorized(self, query: dict) -> bool:
+        """Optional dashboard password: /?k=<DASHBOARD_TOKEN> once, then cookie."""
+        token = self.app.cfg.dashboard_token
+        if not token:
+            return True
+        supplied = (query.get("k") or [""])[0]
+        if supplied and hmac.compare_digest(supplied, token):
+            self._cookie = f"radar_key={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000"
+            return True
+        raw = self.headers.get("Cookie") or ""
+        for part in raw.split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == "radar_key" and hmac.compare_digest(value, token):
+                return True
+        return False
+
+    def _handle_ingest(self, body: dict) -> None:
+        token = self.app.cfg.ingest_token
+        if not token:
+            self._json({"error": "ingest disabled: set INGEST_TOKEN"}, 403)
+            return
+        header = self.headers.get("Authorization") or ""
+        supplied = header[7:].strip() if header.lower().startswith("bearer ") else ""
+        if not supplied or not hmac.compare_digest(supplied, token):
+            self._json({"error": "bad token"}, 401)
+            return
+        try:
+            self._json(self.app.ingest(body if isinstance(body, dict) else {}))
+        except ValueError as exc:
+            self._json({"error": str(exc)}, 400)
+        except Exception as exc:  # noqa: BLE001
+            self._json({"error": str(exc)}, 500)
+
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         try:
             length = min(int(self.headers.get("Content-Length") or 0), 1_000_000)
             raw = self.rfile.read(length) if length else b"{}"
             body = json.loads(raw.decode("utf-8") or "{}")
+
+            if parsed.path == "/api/ingest":
+                self._handle_ingest(body)
+                return
+
+            if not self._authorized(parse_qs(parsed.query)):
+                self._json({"error": "unauthorized"}, 401)
+                return
+
             if parsed.path == "/api/settings":
                 self._json(self.app.update_settings(body if isinstance(body, dict) else {}))
             else:
@@ -305,6 +399,8 @@ def make_server(app: App) -> ThreadingHTTPServer:
 def main() -> int:
     cfg = Config()
     store = Store(cfg.db_path)
+    if cfg.device_name and cfg.device_name != "local":
+        store.rename_device("local", cfg.device_name)
     collector = Collector(cfg, store)
     app = App(cfg, store, collector)
     collector.start()

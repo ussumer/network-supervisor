@@ -39,6 +39,7 @@ class Collector:
         self._meta: dict[str, tuple[str, str, str, str]] = {}
         self._global: tuple[int, int] = (0, 0)
         self._primed = False
+        self.device = getattr(cfg, "device_name", "") or "local"
         self._rates: deque[tuple[float, int, int]] = deque(maxlen=300)
         self._live: list[dict[str, Any]] = []
         self._event_ts: dict[str, float] = {}
@@ -135,7 +136,7 @@ class Collector:
     def _ingest(self, payload: dict[str, Any], elapsed: float) -> None:
         minute = int(time.time() // 60 * 60)
         connections = payload.get("connections") or []
-        rows: dict[tuple[int, str, str, str, str], list[int]] = defaultdict(lambda: [0, 0])
+        rows: dict[tuple[int, str, str, str, str, str], list[int]] = defaultdict(lambda: [0, 0])
         seen: set[str] = set()
         live: list[dict[str, Any]] = []
         up_delta = down_delta = 0
@@ -171,7 +172,7 @@ class Collector:
             self._meta[cid] = (process, node, host, rule_label)
 
             if delta_up or delta_down:
-                row = rows[(minute, process, node, host, rule_label)]
+                row = rows[(minute, self.device, process, node, host, rule_label)]
                 row[0] += delta_up
                 row[1] += delta_down
                 up_delta += delta_up
@@ -234,7 +235,8 @@ class Collector:
 
         if rows:
             self.store.add_usage(
-                [(key[0], key[1], key[2], key[3], key[4], val[0], val[1]) for key, val in rows.items()]
+                [(key[0], key[1], key[2], key[3], key[4], key[5], val[0], val[1])
+                 for key, val in rows.items()]
             )
 
         self.upload_total += up_delta
@@ -249,7 +251,7 @@ class Collector:
     def _attribute_residual(self, rows, minute, vanished, res_up, res_down) -> None:
         if not vanished:
             # bytes we cannot tie to any connection (very short-lived flows)
-            row = rows[(minute, "(unattributed)", "(unattributed)", "(closed)", "(closed)")]
+            row = rows[(minute, self.device, "(unattributed)", "(unattributed)", "(closed)", "(closed)")]
             row[0] += res_up
             row[1] += res_down
             return
@@ -257,7 +259,7 @@ class Collector:
         remaining_up, remaining_down = res_up, res_down
         for index, (dimensions, weight) in enumerate(vanished):
             process, node, host, rule = dimensions
-            row = rows[(minute, process, node, host, rule)]
+            row = rows[(minute, self.device, process, node, host, rule)]
             if index == len(vanished) - 1:
                 share_up, share_down = remaining_up, remaining_down
             else:

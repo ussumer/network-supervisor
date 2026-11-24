@@ -190,16 +190,23 @@
     const hours = state.rangeMinutes / 60;
     const label = RANGES[state.rangeMinutes] || `${hours}h`;
     try {
-      const [p, h, n, r] = await Promise.all([
+      const [p, h, n, r, d] = await Promise.all([
         getJSON(`/api/top?dim=process&hours=${hours}&limit=10`),
         getJSON(`/api/top?dim=host&hours=${hours}&limit=10`),
         getJSON(`/api/top?dim=node&hours=${hours}&limit=10`),
         getJSON(`/api/top?dim=rule&hours=${hours}&limit=10`),
+        getJSON(`/api/devices?hours=${hours}`),
       ]);
       $('#ttlProcess').textContent = `Top 进程（近 ${label}）`;
       $('#ttlHost').textContent = `Top 域名（近 ${label}）`;
       $('#ttlNode').textContent = `Top 节点（近 ${label}）`;
       $('#ttlRule').textContent = `Top 规则（近 ${label}）`;
+      $('#ttlDevice').textContent = `设备（近 ${label}）`;
+      const devices = d.items || [];
+      $('#deviceHint').textContent = devices.length > 1
+        ? `${devices.length} 台设备合计计入下方总额`
+        : '只有本机数据；手机端跑 android-agent.py 后这里会多一行';
+      renderTop('#topDevice', devices);
       renderTop('#topProcess', p.items);
       renderTop('#topHost', h.items);
       renderTop('#topNode', n.items);
