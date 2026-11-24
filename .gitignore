@@ -1,0 +1,11 @@
+.env
+.env.bak*
+data/
+flclash-config/
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.idea/
+.vscode/
+.DS_Store

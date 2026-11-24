@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>clash-radar · 流量流向</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c222b; --border:#262d36;
+    --text:#e6edf3; --muted:#8b949e; --faint:#6e7681;
+    --blue:#58a6ff; --orange:#f0883e; --green:#3fb950; --red:#f85149; --purple:#bc8cff;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--text);
+    font:14px/1.5 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+  a{color:var(--blue)}
+  .wrap{max-width:1320px;margin:0 auto;padding:20px 22px 60px}
+
+  header.topbar{display:flex;align-items:center;justify-content:space-between;
+    padding:14px 22px;border-bottom:1px solid var(--border);background:#0b0f14;position:sticky;top:0;z-index:9}
+  .brand{font-size:17px;font-weight:650;letter-spacing:.3px}
+  .brand .sub{font-size:12px;font-weight:400;color:var(--muted);margin-left:8px}
+  .status{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted)}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--faint);box-shadow:0 0 0 3px rgba(139,148,158,.12)}
+  .dot.ok{background:var(--green);box-shadow:0 0 0 3px rgba(63,185,80,.15)}
+  .dot.bad{background:var(--red);box-shadow:0 0 0 3px rgba(248,81,73,.15)}
+  .dot.warn{background:var(--orange);box-shadow:0 0 0 3px rgba(240,136,62,.15)}
+
+  .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:20px 0 14px}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px}
+  .card h2{font-size:13px;font-weight:600;color:var(--muted);margin:0 0 12px;letter-spacing:.4px;text-transform:uppercase}
+  .label{font-size:12px;color:var(--muted);letter-spacing:.4px}
+  .value{font-size:28px;font-weight:650;margin:6px 0 4px;font-variant-numeric:tabular-nums}
+  .value.small{font-size:22px}
+  .hint{font-size:12px;color:var(--faint);font-variant-numeric:tabular-nums}
+  .hint b{color:var(--muted);font-weight:600}
+  .bar{height:6px;border-radius:4px;background:#21262d;overflow:hidden;margin-top:10px}
+  .bar>i{display:block;height:100%;width:0;border-radius:4px;background:linear-gradient(90deg,var(--green),var(--blue));
+    transition:width .4s ease}
+  .bar.warn>i{background:linear-gradient(90deg,var(--orange),var(--red))}
+
+  .wide{margin:14px 0}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:14px 0}
+  .row{display:flex;align-items:center;gap:10px}
+  .space{justify-content:space-between}
+
+  .tabs{display:flex;gap:6px}
+  .tabs button{background:#21262d;color:var(--muted);border:1px solid var(--border);
+    padding:4px 11px;border-radius:7px;font-size:12px;cursor:pointer}
+  .tabs button:hover{color:var(--text)}
+  .tabs button.active{background:#1f6feb22;border-color:#1f6feb66;color:var(--blue)}
+
+  #chart{width:100%;height:240px;display:block;margin-top:8px}
+  .legend{display:flex;gap:16px;font-size:12px;color:var(--muted);margin-top:4px}
+  .legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:1px}
+
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;color:var(--faint);font-weight:500;font-size:11px;letter-spacing:.4px;
+    text-transform:uppercase;padding:0 8px 8px 0;border-bottom:1px solid var(--border)}
+  td{padding:8px 8px 8px 0;border-bottom:1px solid #1b2027;vertical-align:middle}
+  tr:last-child td{border-bottom:none}
+  td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .name{max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .tag{font-size:11px;color:var(--faint);margin-left:6px}
+  .ratio{font-size:11px;padding:1px 6px;border-radius:5px;background:#bc8cff22;color:var(--purple);margin-left:6px}
+  .share{height:4px;background:#21262d;border-radius:3px;overflow:hidden;min-width:60px}
+  .share>i{display:block;height:100%;background:var(--blue);opacity:.75}
+  .scroll{max-height:420px;overflow:auto}
+  .scroll::-webkit-scrollbar{width:8px}
+  .scroll::-webkit-scrollbar-thumb{background:#2b333d;border-radius:4px}
+
+  details summary{cursor:pointer;color:var(--muted);font-size:13px;font-weight:600;letter-spacing:.4px}
+  .form{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:16px}
+  .field{display:flex;flex-direction:column;gap:6px}
+  .field label{font-size:12px;color:var(--muted)}
+  input,select,textarea{background:#0d1117;border:1px solid var(--border);color:var(--text);
+    border-radius:8px;padding:8px 10px;font:inherit;font-size:13px;outline:none}
+  input:focus,select:focus,textarea:focus{border-color:#1f6feb}
+  textarea{min-height:110px;resize:vertical;font-family:ui-monospace,Consolas,monospace;font-size:12px}
+  .full{grid-column:1/-1}
+  .btn{background:#1f6feb;border:none;color:#fff;padding:9px 18px;border-radius:8px;
+    font:inherit;font-size:13px;font-weight:600;cursor:pointer}
+  .btn:hover{background:#2f81f7}
+  .btn.ghost{background:#21262d;color:var(--text)}
+  .toast{position:fixed;right:22px;bottom:22px;background:#1f6feb;color:#fff;padding:10px 16px;
+    border-radius:9px;font-size:13px;opacity:0;transform:translateY(8px);
+    transition:all .25s;pointer-events:none}
+  .toast.show{opacity:1;transform:none}
+  .toast.err{background:var(--red)}
+  .empty{color:var(--faint);font-size:13px;padding:14px 0}
+
+  @media (max-width:1000px){
+    .cards{grid-template-columns:repeat(2,1fr)}
+    .grid2{grid-template-columns:1fr}
+    .form{grid-template-columns:repeat(2,1fr)}
+  }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">clash-radar<span class="sub">代理流量流向 · 计费口径</span></div>
+  <div class="status"><span id="dot" class="dot"></span><span id="statusText">连接中…</span><span id="metaText" class="tag"></span></div>
+</header>
+
+<div class="wrap">
+  <section class="cards">
+    <div class="card">
+      <div class="label">今日计费流量</div>
+      <div class="value" id="todayBilled">—</div>
+      <div class="hint" id="todayHint">原始 — · 直连 —</div>
+    </div>
+    <div class="card">
+      <div class="label">本周期计费</div>
+      <div class="value" id="cycleUsed">—</div>
+      <div class="hint" id="cycleHint">—</div>
+    </div>
+    <div class="card">
+      <div class="label">剩余额度</div>
+      <div class="value" id="remain">—</div>
+      <div class="hint" id="remainHint">—</div>
+      <div class="bar" id="bar"><i></i></div>
+    </div>
+    <div class="card">
+      <div class="label">实时速率</div>
+      <div class="value small" id="rate">—</div>
+      <div class="hint">↑ <span id="upRate">0 B</span>/s · ↓ <span id="downRate">0 B</span>/s</div>
+    </div>
+  </section>
+
+  <section class="card wide">
+    <div class="row space">
+      <h2>流量曲线（计费 / 下行 / 上行）</h2>
+      <div class="tabs" id="rangeTabs">
+        <button data-min="60" class="active">1h</button>
+        <button data-min="360">6h</button>
+        <button data-min="1440">24h</button>
+        <button data-min="10080">7d</button>
+      </div>
+    </div>
+    <div class="legend">
+      <span><i style="background:var(--green)"></i>计费</span>
+      <span><i style="background:var(--blue)"></i>下行</span>
+      <span><i style="background:var(--orange)"></i>上行</span>
+    </div>
+    <svg id="chart" viewBox="0 0 960 240" preserveAspectRatio="none"></svg>
+  </section>
+
+  <section class="grid2">
+    <div class="card"><h2 id="ttlProcess">Top 进程</h2><table id="topProcess"><tbody></tbody></table></div>
+    <div class="card"><h2 id="ttlHost">Top 域名</h2><table id="topHost"><tbody></tbody></table></div>
+  </section>
+
+  <section class="grid2">
+    <div class="card"><h2 id="ttlNode">Top 节点</h2><table id="topNode"><tbody></tbody></table></div>
+    <div class="card"><h2 id="ttlRule">Top 规则</h2><table id="topRule"><tbody></tbody></table></div>
+  </section>
+
+  <section class="card wide">
+    <div class="row space">
+      <h2>实时连接</h2>
+      <span class="hint" id="liveHint">—</span>
+    </div>
+    <div class="scroll"><table id="liveTable"><tbody></tbody></table></div>
+  </section>
+
+  <section class="card wide">
+    <details>
+      <summary>设置：额度 / 计费口径 / 节点倍率</summary>
+      <div class="form">
+        <div class="field">
+          <label>套餐总额度 (GB)</label>
+          <input id="fBudget" type="number" min="1" step="1" value="100">
+        </div>
+        <div class="field">
+          <label>计费口径</label>
+          <select id="fBilling">
+            <option value="updown">上传 + 下载</option>
+            <option value="down">只算下载</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>周期</label>
+          <select id="fCycle">
+            <option value="calendar">按自然月</option>
+            <option value="rolling">滚动 N 天</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>周期起始日 / 滚动天数</label>
+          <input id="fCycleDay" type="number" min="1" max="365" value="1">
+        </div>
+        <div class="field full">
+          <label>节点倍率（每行：正则 + 倍率，匹配节点名，先匹配先赢；留空即 1x）</label>
+          <textarea id="fRatios" placeholder="^GBR.* 2&#10;^HKG.* 1.5&#10;.* 1.0"></textarea>
+        </div>
+        <div class="row full">
+          <button class="btn" id="btnSave">保存</button>
+          <button class="btn ghost" id="btnReload">重新读取</button>
+          <span class="hint" id="saveHint"></span>
+        </div>
+      </div>
+    </details>
+  </section>
+</div>
+
+<div class="toast" id="toast"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

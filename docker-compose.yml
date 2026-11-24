@@ -1,0 +1,42 @@
+name: clash-radar
+
+services:
+  radar:
+    build:
+      context: .
+    image: clash-radar:local
+    container_name: clash-radar
+    restart: unless-stopped
+    ports:
+      # 只绑定回环，不暴露到局域网
+      - "127.0.0.1:${PORT:-8787}:8787"
+    environment:
+      CLASH_API: ${CLASH_API:-http://host.docker.internal:9090}
+      CLASH_SECRET: ${CLASH_SECRET:-}
+      CLASH_SECRET_FILE: /flclash/shared_preferences.json
+      POLL_INTERVAL: ${POLL_INTERVAL:-1}
+      BUDGET_GB: ${BUDGET_GB:-100}
+      BILLING_MODE: ${BILLING_MODE:-updown}
+      TZ_OFFSET_HOURS: ${TZ_OFFSET_HOURS:-8}
+      DETAIL_RETENTION_DAYS: ${DETAIL_RETENTION_DAYS:-30}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - radar-data:/data
+      # 只读挂载代理客户端配置目录，用于自动读取 API secret
+      # 用 scripts/setup-windows.ps1 会自动填好；也可在 .env 里手写
+      - "${FLCLASH_DIR:-./flclash-config}:/flclash:ro"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/api/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  radar-data:
